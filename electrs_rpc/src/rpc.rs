@@ -373,13 +373,15 @@ impl Rpc {
 
     fn scripthash_get_history(
         &self,
-        subscription: &Subscription,
+        subscription: &mut Subscription,
         (scripthash,): (ScriptHash,),
     ) -> Result<Value> {
-        match subscription.scripthashes.get(&scripthash) {
-            Some(status) => Ok(json!(status.entries)),
-            None => bail!("no subscription for scripthash"),
-        }
+        self.subscribe_if_needed(subscription, scripthash)?;
+        let status = subscription
+            .scripthashes
+            .get(&scripthash)
+            .expect("missing subscription");
+        Ok(json!(status.entries))
     }
 
     fn scripthash_subscribe(
@@ -387,11 +389,23 @@ impl Rpc {
         subscription: &mut Subscription,
         (scripthash,): (ScriptHash,),
     ) -> Result<Value> {
+        self.subscribe_if_needed(subscription, scripthash)?;
+        let status = subscription
+            .scripthashes
+            .get(&scripthash)
+            .expect("missing subscription");
+        Ok(json!(status.hash))
+    }
+
+    fn subscribe_if_needed(
+        &self,
+        subscription: &mut Subscription,
+        scripthash: ScriptHash,
+    ) -> Result<()> {
         let (entries, tip) = self.get_confirmed(&scripthash)?;
         let status = Status::new(entries, tip);
-        let hash = status.hash;
         subscription.scripthashes.insert(scripthash, status);
-        Ok(json!(hash))
+        Ok(())
     }
 
     fn scripthash_unsubscribe(
