@@ -8,7 +8,6 @@ use std::ops::Bound;
 use bitcoin::hashes::Hash;
 use bitcoin::{Amount, OutPoint, Transaction, Txid};
 use bitcoincore_rpc::json;
-use rayon::prelude::*;
 use serde::ser::{Serialize, SerializeSeq, Serializer};
 
 use crate::{
@@ -109,21 +108,27 @@ impl Mempool {
         let new_txids = HashSet::<Txid>::from_iter(txids);
         let old_txids = HashSet::<Txid>::from_iter(self.entries.keys().copied());
 
-        let to_add = &new_txids - &old_txids;
-        let to_remove = &old_txids - &new_txids;
+        let to_add: HashSet<Txid> = &new_txids - &old_txids;
+        let to_remove: HashSet<Txid> = &old_txids - &new_txids;
 
         let removed = to_remove.len();
         for txid in to_remove {
             self.remove_entry(txid);
         }
+        let mut mempool_entries = daemon
+            .get_existing_mempool_entries(to_add.iter().copied())
+            .unwrap();
+        let mut transactions = daemon
+            .get_existing_transactions(to_add.iter().copied())
+            .unwrap();
+
         let entries: Vec<_> = to_add
-            .par_iter()
+            .iter()
             .filter_map(|txid| {
-                match (
-                    daemon.get_transaction(txid, None),
-                    daemon.get_mempool_entry(txid),
-                ) {
-                    (Ok(tx), Ok(entry)) => Some((txid, tx, entry)),
+                let tx = transactions.remove(txid);
+                let entry = mempool_entries.remove(txid);
+                match (tx, entry) {
+                    (Some(tx), Some(entry)) => Some((txid, tx, entry)),
                     _ => None,
                 }
             })

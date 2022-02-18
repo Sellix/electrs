@@ -8,8 +8,9 @@ use bitcoin::{
 use bitcoincore_rpc::{json, jsonrpc, Auth, Client, RpcApi};
 use crossbeam_channel::Receiver;
 use parking_lot::Mutex;
-use serde_json::{json, Value};
+use serde_json::{json, value::RawValue, Value};
 
+use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -247,10 +248,63 @@ impl Daemon {
             .context("failed to get mempool txids")
     }
 
-    pub(crate) fn get_mempool_entry(&self, txid: &Txid) -> Result<json::GetMempoolEntryResult> {
-        self.rpc
-            .get_mempool_entry(txid)
-            .context("failed to get mempool entry")
+    fn get_existing<T: for<'a> serde::de::Deserialize<'a>, U>(
+        &self,
+        command: &str,
+        txids: impl Iterator<Item = Txid>,
+        map_fn: impl Fn(T) -> Result<U>,
+    ) -> Result<HashMap<Txid, U>> {
+        let client = self.rpc.get_jsonrpc_client();
+        let txids: Vec<Txid> = txids.collect();
+        if txids.is_empty() {
+            return Ok(Default::default());
+        }
+        let args_vec: Vec<Vec<Box<RawValue>>> =
+            txids.iter().map(|txid| vec![jsonrpc::arg(txid)]).collect();
+        let requests: Vec<jsonrpc::Request> = args_vec
+            .iter()
+            .map(|args| client.build_request(command, args))
+            .collect();
+        let responses = client
+            .send_batch(&requests)
+            .with_context(|| format!("{} failed", command))?;
+        Ok(responses
+            .into_iter()
+            .zip(txids.into_iter())
+            .filter_map(|(response, txid)| response.map(|r| (r, txid))) // drop missing entries
+            .filter_map(|(response, txid)| match response.result::<T>() {
+                Ok(response) => match map_fn(response) {
+                    Ok(r) => Some((txid, r)),
+                    Err(err) => {
+                        warn!("{} {} failed to convert response: {:?}", command, txid, err); // drop failed responses
+                        None
+                    }
+                },
+                Err(err) => {
+                    warn!("{} {} failed: {:?}", command, txid, err); // drop failed responses
+                    None
+                }
+            })
+            .collect())
+    }
+
+    fn tx_from_hex(hex: String) -> Result<Transaction> {
+        let bytes: Vec<u8> = bitcoin::hashes::hex::FromHex::from_hex(&hex)?;
+        Ok(bitcoin::consensus::encode::deserialize(&bytes)?)
+    }
+
+    pub(crate) fn get_existing_mempool_entries(
+        &self,
+        txids: impl Iterator<Item = Txid>,
+    ) -> Result<HashMap<Txid, json::GetMempoolEntryResult>> {
+        self.get_existing("getmempoolentry", txids, |entry| Ok(entry))
+    }
+
+    pub(crate) fn get_existing_transactions(
+        &self,
+        txids: impl Iterator<Item = Txid>,
+    ) -> Result<HashMap<Txid, Transaction>> {
+        self.get_existing("getrawtransaction", txids, Daemon::tx_from_hex)
     }
 
     fn get_block_locations(&self, blockhashes: &[BlockHash]) -> Result<Vec<FilePosition>> {
